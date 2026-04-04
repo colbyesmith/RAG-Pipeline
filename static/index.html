@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF RAG Chat</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #5b9fd4;
+      --border: #2a3a4d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      max-width: 1100px;
+      width: 100%;
+      margin: 0 auto;
+      gap: 0;
+      min-height: 0;
+    }
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .sidebar {
+      border-right: 1px solid var(--border);
+      padding: 1rem;
+      background: #121a24;
+    }
+    .sidebar label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .sidebar input[type="file"] { font-size: 0.75rem; max-width: 100%; }
+    .btn {
+      margin-top: 0.75rem;
+      width: 100%;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #0a0e14;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); white-space: pre-wrap; }
+    .chat {
+      display: flex;
+      flex-direction: column;
+      min-height: 420px;
+      max-height: calc(100vh - 120px);
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .bubble {
+      max-width: 92%;
+      padding: 0.65rem 0.85rem;
+      border-radius: 10px;
+      line-height: 1.45;
+      font-size: 0.9rem;
+    }
+    .bubble.user { align-self: flex-end; background: #243447; }
+    .bubble.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+    .bubble .meta { margin-top: 0.5rem; font-size: 0.72rem; color: var(--muted); }
+    .composer {
+      padding: 0.75rem 1rem 1rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 0.5rem;
+    }
+    .composer input {
+      flex: 1;
+      padding: 0.55rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #121a24;
+      color: var(--text);
+    }
+    .composer button {
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #0a0e14;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .composer button:disabled { opacity: 0.5; }
+    code { font-size: 0.85em; }
+    .scores-wrap { margin-top: 0.75rem; font-size: 0.78rem; overflow-x: auto; }
+    .scores-wrap table { border-collapse: collapse; width: 100%; margin-top: 0.25rem; }
+    .scores-wrap th, .scores-wrap td {
+      border: 1px solid var(--border);
+      padding: 0.35rem 0.45rem;
+      text-align: left;
+    }
+    .scores-wrap th { color: var(--muted); font-weight: 600; }
+    .scores-wrap caption {
+      caption-side: top;
+      text-align: left;
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PDF RAG (Mistral + custom retrieval)</h1>
+    <p>Upload PDFs, then ask questions. Replies should include inline <code>(Source: file.pdf, p.N)</code> citations; tables below show similarity scores per document and per chunk.</p>
+  </header>
+  <main>
+    <aside class="sidebar">
+      <label>PDF files</label>
+      <input type="file" id="files" accept="application/pdf,.pdf" multiple />
+      <button class="btn" type="button" id="ingestBtn">Ingest</button>
+      <div class="status" id="ingestStatus"></div>
+    </aside>
+    <section class="chat">
+      <div class="messages" id="messages"></div>
+      <form class="composer" id="form">
+        <input type="text" id="q" placeholder="Ask about your documents…" autocomplete="off" />
+        <button type="submit" id="sendBtn">Send</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const ingestBtn = document.getElementById("ingestBtn");
+    const ingestStatus = document.getElementById("ingestStatus");
+    const filesInput = document.getElementById("files");
+    const form = document.getElementById("form");
+    const qInput = document.getElementById("q");
+    const sendBtn = document.getElementById("sendBtn");
+
+    function addBubble(role, html, meta) {
+      const div = document.createElement("div");
+      div.className = "bubble " + role;
+      div.innerHTML = html + (meta ? '<div class="meta">' + meta + "</div>" : "");
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function fmtNum(x) {
+      if (x === null || x === undefined) return "—";
+      const n = Number(x);
+      return Number.isFinite(n) ? n.toFixed(3) : "—";
+    }
+
+    function scoreTablesHtml(data) {
+      let h = "";
+      const ds = data.document_scores || [];
+      if (ds.length) {
+        h += '<div class="scores-wrap"><table><caption>By document (retrieval)</caption><thead><tr>';
+        h += "<th>Document</th><th>Chunks</th><th>cos max</th><th>cos mean</th><th>BM25 max</th><th>RRF max</th><th>CE max</th></tr></thead><tbody>";
+        for (const d of ds) {
+          h += "<tr><td>" + escapeHtml(d.source_file) + "</td><td>" + d.chunks_used + "</td>";
+          h += "<td>" + fmtNum(d.semantic_similarity_max) + "</td><td>" + fmtNum(d.semantic_similarity_mean) + "</td>";
+          h += "<td>" + fmtNum(d.bm25_score_max) + "</td><td>" + fmtNum(d.rrf_score_max) + "</td>";
+          h += "<td>" + fmtNum(d.cross_encoder_score_max) + "</td></tr>";
+        }
+        h += "</tbody></table></div>";
+      }
+      const cit = data.citations || [];
+      if (cit.length) {
+        h += '<div class="scores-wrap"><table><caption>By chunk (passed to the model)</caption><thead><tr>';
+        h += "<th>Document</th><th>Page</th><th>cos</th><th>BM25</th><th>RRF</th><th>CE</th><th>chunk id</th></tr></thead><tbody>";
+        for (const c of cit) {
+          const pg = c.page_start === c.page_end ? "p." + c.page_start : "p." + c.page_start + "–" + c.page_end;
+          h += "<tr><td>" + escapeHtml(c.source_file) + "</td><td>" + escapeHtml(pg) + "</td>";
+          h += "<td>" + fmtNum(c.similarity) + "</td><td>" + fmtNum(c.bm25_score) + "</td>";
+          h += "<td>" + fmtNum(c.rrf_score) + "</td><td>" + fmtNum(c.cross_encoder_score) + "</td>";
+          h += "<td><code>" + escapeHtml(c.chunk_id.slice(0, 8)) + "…</code></td></tr>";
+        }
+        h += "</tbody></table></div>";
+      }
+      return h;
+    }
+
+    ingestBtn.onclick = async () => {
+      const files = filesInput.files;
+      if (!files.length) {
+        ingestStatus.textContent = "Choose one or more PDFs.";
+        return;
+      }
+      const fd = new FormData();
+      for (const f of files) fd.append("files", f);
+      ingestBtn.disabled = true;
+      ingestStatus.textContent = "Uploading…";
+      try {
+        const r = await fetch("/ingest", { method: "POST", body: fd });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        ingestStatus.textContent = data.message + "\nChunks: " + data.chunks_added;
+      } catch (e) {
+        ingestStatus.textContent = "Error: " + e.message;
+      } finally {
+        ingestBtn.disabled = false;
+      }
+    };
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const query = qInput.value.trim();
+      if (!query) return;
+      qInput.value = "";
+      addBubble("user", escapeHtml(query), "");
+      sendBtn.disabled = true;
+      try {
+        const r = await fetch("/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        let body = escapeHtml(data.answer).replace(/\n/g, "<br/>");
+        let meta = [];
+        if (data.insufficient_evidence) meta.push("insufficient evidence (retrieval gate)");
+        if (data.retrieval_skipped_reason) meta.push("skip: " + data.retrieval_skipped_reason);
+        meta.push("intent: " + data.intent + ", retrieval: " + data.needs_retrieval);
+        if (data.citations && data.citations.length) {
+          const cites = data.citations.map((c) =>
+            c.source_file + " p." + c.page_start + (c.page_end !== c.page_start ? "–" + c.page_end : "")
+          );
+          meta.push("citations: " + cites.join("; "));
+        }
+        if (data.policy_flags && data.policy_flags.length) meta.push("policy: " + data.policy_flags.join(", "));
+        if (data.hallucination_flags && data.hallucination_flags.length)
+          meta.push("evidence check: " + data.hallucination_flags.length + " sentence(s) flagged");
+        const tables = scoreTablesHtml(data);
+        addBubble("assistant", body + tables, meta.join(" · "));
+      } catch (e) {
+        addBubble("assistant", "Error: " + escapeHtml(e.message), "");
+      } finally {
+        sendBtn.disabled = false;
+      }
+    };
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+# Optional: cross-encoder re-ranking (set RAG_CROSS_ENCODER_ENABLED=true in .env)
+# pip install -r requirements-cross-encoder.txt
+sentence-transformers>=3.0.0
