@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import statistics
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,15 +20,17 @@ from app.config import Settings, get_settings
 from app.cross_encoder_rerank import rerank_with_cross_encoder
 from app.generation import generate_answer
 from app.hybrid_search import hybrid_search
+from app.vector_ann import configure_vector_ann_from_settings
 from app.intent_query import classify_and_rewrite
-from app.pdf_ingest import chunk_pages, extract_pages_pdf
+from app.pdf_ingest import TextChunk, chunk_pages, extract_pages_pdf
 from app.policies import evaluate_query_policies
 from app.multi_hop import merge_two_hop_candidates, propose_followup_query
 from app.mistral_client import MistralError, mistral_embed
 from app.attribution import summarize_scores_by_document
-from app.schemas import Citation, IngestResponse, QueryRequest, QueryResponse
+from app.schemas import Citation, IngestResponse, IngestTimings, QueryRequest, QueryResponse
 
 _BASE = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 _STATIC = _BASE / "static"
 
 
@@ -56,6 +60,21 @@ async def _embed_in_batches(
     return out
 
 
+def _pdf_to_chunks_sync(tmp_path: str, name: str, settings: Settings) -> list[TextChunk]:
+    pages = extract_pages_pdf(
+        tmp_path,
+        name,
+        pdf_fast=settings.pdf_extract_fast,
+        pdf_fitz_min_chars_skip_pypdf=settings.pdf_fitz_min_chars_skip_pypdf,
+    )
+    return chunk_pages(
+        pages,
+        name,
+        settings.chunk_size_chars,
+        settings.chunk_overlap_chars,
+    )
+
+
 def _rebuild_bm25() -> BM25Index:
     idx = BM25Index()
     idx.build(store.all_with_embeddings())
@@ -64,6 +83,7 @@ def _rebuild_bm25() -> BM25Index:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_vector_ann_from_settings(get_settings())
     app.state.http = httpx.AsyncClient()
     yield
     await app.state.http.aclose()
@@ -96,8 +116,7 @@ async def ingest(
     max_bytes = settings.upload_max_mb * 1024 * 1024
     client: httpx.AsyncClient = app.state.http
 
-    all_chunks = []
-    names: list[str] = []
+    jobs: list[tuple[str, str]] = []
     for uf in files:
         raw_name = uf.filename or "document.pdf"
         name = _safe_name(raw_name)
@@ -106,39 +125,60 @@ async def ingest(
             raise HTTPException(status_code=413, detail=f"File {name} exceeds upload limit")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(content)
-            tmp_path = tmp.name
-        try:
-            pages = extract_pages_pdf(tmp_path, name)
-            chunks = chunk_pages(
-                pages,
-                name,
-                settings.chunk_size_chars,
-                settings.chunk_overlap_chars,
-            )
-            all_chunks.extend(chunks)
-            names.append(name)
-        finally:
-            os.unlink(tmp_path)
+            jobs.append((tmp.name, name))
+
+    all_chunks: list[TextChunk] = []
+    names = [n for _, n in jobs]
+    t_extract0 = time.perf_counter()
+    try:
+        chunk_lists = await asyncio.gather(
+            *[asyncio.to_thread(_pdf_to_chunks_sync, tp, n, settings) for tp, n in jobs]
+        )
+        for cl in chunk_lists:
+            all_chunks.extend(cl)
+    finally:
+        for tmp_path, _ in jobs:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    extract_s = time.perf_counter() - t_extract0
 
     if not all_chunks:
+        logger.info(
+            "ingest timings: pdf_extract+chunk=%.2fs embedding=0.00s chunks=0 files=%d",
+            extract_s,
+            len(names),
+        )
         return IngestResponse(
             ingested_files=names,
             chunks_added=0,
             message="No extractable text found. Scanned PDFs need an OCR tool upstream; "
             "for text PDFs, try re-exporting from the source app.",
+            timings=IngestTimings(pdf_extract_and_chunk_s=extract_s, embedding_s=0.0),
         )
 
     texts = [c.text for c in all_chunks]
+    t_embed0 = time.perf_counter()
     try:
         embeddings = await _embed_in_batches(client, settings, texts)
     except MistralError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+    embed_s = time.perf_counter() - t_embed0
 
     added = store.add_chunks(all_chunks, embeddings)
+    logger.info(
+        "ingest timings: pdf_extract+chunk=%.2fs embedding=%.2fs chunks=%d files=%d",
+        extract_s,
+        embed_s,
+        added,
+        len(names),
+    )
     return IngestResponse(
         ingested_files=names,
         chunks_added=added,
         message=f"Indexed {added} chunks from {len(names)} file(s).",
+        timings=IngestTimings(pdf_extract_and_chunk_s=extract_s, embedding_s=embed_s),
     )
 
 
@@ -213,6 +253,8 @@ async def query_endpoint(
         q_emb,
         top_k=pool_k,
         rrf_k=settings.rrf_k,
+        settings=settings,
+        retrieve_pool_k=pool_k,
     )
 
     if settings.rag_multi_hop_enabled and candidates:
@@ -237,6 +279,8 @@ async def query_endpoint(
                     q_emb2,
                     top_k=pool_k,
                     rrf_k=settings.rrf_k,
+                    settings=settings,
+                    retrieve_pool_k=pool_k,
                 )
                 candidates = merge_two_hop_candidates(
                     chunks,

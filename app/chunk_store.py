@@ -6,11 +6,12 @@ No external vector database: vectors live alongside chunk records in RAM.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 from app.pdf_ingest import TextChunk
+from app.vector_ann import get_chunk_ann
 
 
 @dataclass
@@ -27,8 +28,10 @@ class ChunkStore:
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+        get_chunk_ann().clear()
 
     def add_chunks(self, chunks: list[TextChunk], embeddings: list[list[float]] | None) -> int:
+        raw_vecs: list[np.ndarray | None] = []
         with self._lock:
             for i, ch in enumerate(chunks):
                 emb = None
@@ -39,7 +42,16 @@ class ChunkStore:
                         v = v / n
                     emb = v
                 self._items.append(StoredChunk(chunk=ch, embedding=emb))
-            return len(chunks)
+                raw_vecs.append(emb.astype(np.float32) if emb is not None else None)
+
+        dim = next((int(v.shape[0]) for v in raw_vecs if v is not None), None)
+        if dim is not None:
+            batch = np.stack(
+                [v if v is not None else np.zeros(dim, dtype=np.float32) for v in raw_vecs],
+                axis=0,
+            )
+            get_chunk_ann().extend(batch)
+        return len(chunks)
 
     def all_with_embeddings(self) -> list[StoredChunk]:
         with self._lock:

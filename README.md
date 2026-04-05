@@ -31,7 +31,7 @@ flowchart LR
 
 - **Endpoint:** `POST /ingest` — multipart form field `files` (one or more PDFs).
 - **Extraction:** Per page, the longer of [pypdf](https://pypdf.readthedocs.io/) (plain + layout) and [PyMuPDF](https://pymupdf.readthedocs.io/) native text. There is **no OCR**; scanned image-only PDFs will not yield text unless you OCR them outside this app.
-- **Chunking:** Sliding **character** windows with overlap, **per page** (citations stay page-accurate). Defaults are **fine-grained** (`CHUNK_SIZE_CHARS=80`, ~20 tokens) so each vector covers a small span instead of a whole section. **Trade-offs:** finer chunks → better locality and more recall for specific facts, but **more embeddings** at ingest, **more chunks** to score at query time, and **very short** strings can make dense scores noisier (tune `RAG_SIMILARITY_THRESHOLD`). For coarser “paragraph” chunks, raise e.g. to `400–1200`.
+- **Chunking:** Sliding **character** windows with overlap, **per page** (citations stay page-accurate). Defaults target **fewer, larger** slices (`CHUNK_SIZE_CHARS=800`, `CHUNK_OVERLAP_CHARS=120`, ~200 tokens) to cut embedding cost and ingest time. **Trade-offs:** finer chunks (e.g. `400/80` or `80/20`) → better locality for pinpoint facts, but **more** Mistral embed calls and slower ingest; tune `RAG_SIMILARITY_THRESHOLD` if you change granularity.
 
 ### Query processing
 
@@ -119,7 +119,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 ## Scalability notes
 
-- **Today:** Single-process memory store; BM25 rebuilt on each query (fine for small corpora).
+- **Today:** Single-process memory store; BM25 rebuilt on each query (fine for small corpora). Dense retrieval uses **FAISS HNSW** (inner product ≈ cosine on L2-normalized Mistral embeddings) when the chunk count ≥ `rag_ann_min_chunks`; below that threshold it stays exact for simplicity.
 - **Next steps:** Shard embeddings across workers with a shared store, persist chunks + vectors (e.g. Parquet/SQLite blob) without adopting a *vector database product*, background embedding jobs, and optional incremental BM25.
 
 ## Project layout
@@ -129,6 +129,7 @@ app/
   main.py           # FastAPI routes
   pdf_ingest.py     # PDF → chunks
   chunk_store.py    # In-memory chunks + vectors
+  vector_ann.py     # FAISS HNSW index (synced on ingest)
   bm25.py           # Sparse scoring
   semantic_rank.py  # Dense scoring
   hybrid_search.py  # RRF + re-rank

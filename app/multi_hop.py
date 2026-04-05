@@ -14,7 +14,7 @@ from app.chunk_store import StoredChunk
 from app.config import Settings
 from app.hybrid_search import RankedChunk
 from app.mistral_client import mistral_chat, parse_json_object
-from app.semantic_rank import cosine_scores, embed_query_vector
+from app.semantic_rank import embed_query_vector
 
 
 def _previews_for_prompt(ranked: list[RankedChunk], max_chunks: int = 5, max_chars: int = 280) -> str:
@@ -89,8 +89,6 @@ def merge_two_hop_candidates(
 
     qv_p = embed_query_vector(q_emb_primary)
     qv_f = embed_query_vector(q_emb_follow)
-    sem_p = cosine_scores(qv_p, chunks)
-    sem_f = cosine_scores(qv_f, chunks)
     sp_p = bm25.scores(kw_primary)
     sp_f = bm25.scores(kw_follow)
 
@@ -103,10 +101,16 @@ def merge_two_hop_candidates(
     id_to_idx = {chunks[i].chunk.id: i for i in range(len(chunks))}
     union_ids = {r.stored.chunk.id for r in hop1} | {r.stored.chunk.id for r in hop2}
 
+    def _dot(qv, i: int) -> float:
+        emb = chunks[i].embedding
+        if emb is None:
+            return 0.0
+        return float((qv * emb).sum())
+
     rows: list[tuple[int, float, float, float]] = []
     for cid in union_ids:
         i = id_to_idx[cid]
-        sm = max(sem_p[i], sem_f[i])
+        sm = max(_dot(qv_p, i), _dot(qv_f, i))
         bm = max(sp_p[i], sp_f[i])
         rrf = rrf_by_id.get(cid, 0.0)
         rows.append((i, sm, bm, rrf))

@@ -13,7 +13,8 @@ import numpy as np
 
 from app.bm25 import BM25Index
 from app.chunk_store import StoredChunk
-from app.semantic_rank import cosine_scores, embed_query_vector
+from app.config import Settings
+from app.semantic_rank import dense_scores_for_hybrid, embed_query_vector
 
 
 @dataclass
@@ -60,12 +61,19 @@ def hybrid_search(
     query_embedding: list[float],
     top_k: int,
     rrf_k: int,
+    settings: Settings,
+    retrieve_pool_k: int,
 ) -> list[RankedChunk]:
     if not chunks:
         return []
 
     qv = embed_query_vector(query_embedding)
-    sem = cosine_scores(qv, chunks)
+    sem = dense_scores_for_hybrid(
+        qv,
+        chunks,
+        settings,
+        retrieve_pool_k=retrieve_pool_k,
+    )
     sparse = bm25.scores(query_keywords)
 
     sem_order = _rank_order(sem)

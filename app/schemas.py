@@ -7,10 +7,18 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
 
 
+class IngestTimings(BaseModel):
+    """Wall time per ingest phase (helps spot PDF CPU vs Mistral API)."""
+
+    pdf_extract_and_chunk_s: float
+    embedding_s: float
+
+
 class IngestResponse(BaseModel):
     ingested_files: list[str]
     chunks_added: int
     message: str
+    timings: IngestTimings | None = None
 
 
 class Citation(BaseModel):

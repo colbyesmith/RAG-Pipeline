@@ -11,11 +11,15 @@ class Settings(BaseSettings):
     mistral_base_url: str = "https://api.mistral.ai/v1"
     chat_model: str = "mistral-small-latest"
     embed_model: str = "mistral-embed"
-    # Reduce 429s: retries on 429/503, smaller batches, pause between embedding batches (ingest).
+    # Reduce 429s: retries on 429/503; optional pause between embedding batches if you hit limits.
     mistral_api_max_retries: int = Field(default=5, ge=0, le=20)
     mistral_api_retry_base_seconds: float = Field(default=1.0, ge=0.1, le=30.0)
-    mistral_embed_batch_size: int = Field(default=8, ge=1, le=64)
-    mistral_embed_batch_delay_ms: int = Field(default=250, ge=0, le=120_000)
+    # Mistral caps total tokens per embeddings request (error 3210 if exceeded)—lower batch size or chunk length if you get 400s.
+    mistral_embed_batch_size: int = Field(default=128, ge=1, le=512)
+    mistral_embed_batch_delay_ms: int = Field(default=0, ge=0, le=120_000)
+    # PDF: skip slow pypdf paths when PyMuPDF already extracted enough text; pypdf fallback uses plain only.
+    pdf_extract_fast: bool = True
+    pdf_fitz_min_chars_skip_pypdf: int = Field(default=48, ge=0, le=5000)
 
     rag_top_k: int = 8
     rag_retrieve_k: int = 24
@@ -24,12 +28,19 @@ class Settings(BaseSettings):
     rag_multi_hop_enabled: bool = False
     rag_multi_hop_pool_k: int = Field(default=20, ge=8, le=100)
     rag_similarity_threshold: float = 0.32
+    # FAISS HNSW approximate dense retrieval (inner product = cosine on L2-normalized vectors).
+    rag_ann_enabled: bool = True
+    rag_ann_min_chunks: int = Field(default=384, ge=32, le=1_000_000)
+    rag_ann_neighbors: int = Field(default=512, ge=32, le=8192)
+    rag_ann_hnsw_m: int = Field(default=32, ge=8, le=64)
+    rag_ann_ef_construction: int = Field(default=200, ge=40, le=800)
+    rag_ann_ef_search: int = Field(default=128, ge=16, le=512)
     rrf_k: int = 60
     upload_max_mb: int = 25
-    # Smaller values → more chunks, finer retrieval (roughly tokens ≈ chars / 4 for English).
-    # ~80 chars ≈ ~20 tokens; ~40 ≈ ~10 tokens (very fine, more embed calls, noisier singles).
-    chunk_size_chars: int = Field(default=400, ge=32, le=8000)
-    chunk_overlap_chars: int = Field(default=80, ge=0, le=2000)
+    # Larger chunk_size_chars → fewer chunks, faster/cheaper ingest (fewer embed calls), coarser citations.
+    # Roughly: tokens ≈ chars / 4 for English. Overlap ~12–15% of chunk size is a common default.
+    chunk_size_chars: int = Field(default=800, ge=32, le=8000)
+    chunk_overlap_chars: int = Field(default=120, ge=0, le=2000)
     evidence_overlap_min: float = 0.22
 
 
