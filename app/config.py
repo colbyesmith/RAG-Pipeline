@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     rag_top_k: int = 8
     rag_retrieve_k: int = 24
-    rag_cross_encoder_enabled: bool = False
+    rag_cross_encoder_enabled: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_multi_hop_enabled: bool = False
     rag_multi_hop_pool_k: int = Field(default=20, ge=8, le=100)

@@ -149,7 +149,7 @@ def _chunk_single_page_text(
             break
         start = max(0, end - overlap)
     if not chunks and text.strip():
-        chunks.apcapend(
+        chunks.append(
             TextChunk(
                 id=str(uuid.uuid4()),
                 text=f"[Page {page_num}]\n{text.strip()}",

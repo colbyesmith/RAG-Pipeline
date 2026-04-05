@@ -48,7 +48,7 @@ flowchart LR
 ### Post-processing
 
 - **Re-rank:** RRF score + dual-signal bonus (see `hybrid_search`).
-- **Optional cross-encoder re-rank:** Set `RAG_CROSS_ENCODER_ENABLED=true` and `pip install -r requirements-cross-encoder.txt`. The API pulls **`RAG_RETRIEVE_K`** candidates, scores **(query, passage)** pairs with [sentence-transformers](https://www.sbert.net/) `CrossEncoder`, then keeps **`RAG_TOP_K`**. Model: `CROSS_ENCODER_MODEL`.
+- **Cross-encoder re-rank (default on):** `sentence-transformers` is in `requirements.txt`. The API pulls **`RAG_RETRIEVE_K`** candidates, scores **(query, passage)** pairs with [sentence-transformers](https://www.sbert.net/) `CrossEncoder`, then keeps **`RAG_TOP_K`**. Disable with `RAG_CROSS_ENCODER_ENABLED=false`. Model: `CROSS_ENCODER_MODEL`.
 - **Gate:** On the **first `RAG_TOP_K`** hybrid results (before cross-encoder). If the **best** semantic score is below `RAG_SIMILARITY_THRESHOLD`, or the **mean** is too low, returns **`insufficient evidence`**.
 
 ### Generation
@@ -67,7 +67,7 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Unix: source .venv/bin/activate
 pip install -r requirements.txt
-# Optional cross-encoder: pip install -r requirements-cross-encoder.txt
+# Cross-encoder: included in requirements.txt (disable in .env if unwanted)
 copy .env.example .env   # or cp on Unix; set MISTRAL_API_KEY
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -112,7 +112,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 | LLM + embeddings | [Mistral AI API](https://docs.mistral.ai/) (`/v1/chat/completions`, `/v1/embeddings`) |
 | PDF text | [pypdf](https://pypdf.readthedocs.io/) + [PyMuPDF](https://pymupdf.readthedocs.io/) |
 | Vectors / numerics | [NumPy](https://numpy.org/) |
-| Cross-encoder (optional) | [sentence-transformers](https://www.sbert.net/) |
+| Cross-encoder (default) | [sentence-transformers](https://www.sbert.net/) |
 | Settings | [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) |
 
 **Explicitly not used:** LangChain, LlamaIndex, Haystack, vector DBs, hosted search (Elasticsearch, etc.), or BM25/semantic search packages — only first-party math and tokenization.
@@ -140,7 +140,7 @@ app/
   mistral_client.py # Thin API client
   attribution.py    # Per-document score rollups
   multi_hop.py      # Optional second retrieval hop
-  cross_encoder_rerank.py # Optional CE re-rank
+  cross_encoder_rerank.py # CE re-rank (on by default)
 static/
   index.html        # Chat UI
 ```

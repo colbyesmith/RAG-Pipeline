@@ -18,7 +18,7 @@ from app.bm25 import BM25Index
 from app.chunk_store import store
 from app.config import Settings, get_settings
 from app.cross_encoder_rerank import rerank_with_cross_encoder
-from app.generation import generate_answer
+from app.generation import generate_answer, looks_like_context_denial, strip_trailing_inline_sources
 from app.hybrid_search import hybrid_search
 from app.vector_ann import configure_vector_ann_from_settings
 from app.intent_query import classify_and_rewrite
@@ -340,27 +340,34 @@ async def query_endpoint(
     except MistralError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
-    citations = [
-        Citation(
-            chunk_id=r.stored.chunk.id,
-            source_file=r.stored.chunk.source_file,
-            page_start=r.stored.chunk.page_start,
-            page_end=r.stored.chunk.page_end,
-            similarity=r.semantic_score,
-            bm25_score=r.bm25_score,
-            rrf_score=r.rrf_score,
-            cross_encoder_score=r.cross_encoder_score,
-        )
-        for r in ranked
-    ]
-    doc_scores = summarize_scores_by_document(ranked)
-
-    if hallu_flags:
-        answer = (
-            answer
-            + "\n\n_Note: some sentences had weak lexical overlap with retrieved passages; "
-            "verify critical claims against the cited chunks._"
-        )
+    context_denial = looks_like_context_denial(answer)
+    if context_denial:
+        answer = strip_trailing_inline_sources(answer)
+        hallu_flags = []
+        citations: list[Citation] = []
+        doc_scores = []
+        debug["context_denial"] = True
+    else:
+        citations = [
+            Citation(
+                chunk_id=r.stored.chunk.id,
+                source_file=r.stored.chunk.source_file,
+                page_start=r.stored.chunk.page_start,
+                page_end=r.stored.chunk.page_end,
+                similarity=r.semantic_score,
+                bm25_score=r.bm25_score,
+                rrf_score=r.rrf_score,
+                cross_encoder_score=r.cross_encoder_score,
+            )
+            for r in ranked
+        ]
+        doc_scores = summarize_scores_by_document(ranked)
+        if hallu_flags:
+            answer = (
+                answer
+                + "\n\n_Note: some sentences had weak lexical overlap with retrieved passages; "
+                "verify critical claims against the cited chunks._"
+            )
 
     return QueryResponse(
         answer=answer,

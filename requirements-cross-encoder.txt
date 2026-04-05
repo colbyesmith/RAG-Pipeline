@@ -1,3 +1,4 @@
-# Optional: cross-encoder re-ranking (set RAG_CROSS_ENCODER_ENABLED=true in .env)
+# Cross-encoder deps are included in requirements.txt (rerank on by default).
+# Use this file alone only if you want sentence-transformers without the rest:
 # pip install -r requirements-cross-encoder.txt
 sentence-transformers>=3.0.0
