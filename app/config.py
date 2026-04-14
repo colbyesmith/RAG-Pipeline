@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     rag_retrieve_k: int = 24
     rag_cross_encoder_enabled: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    rag_multi_hop_enabled: bool = False
+    # Multi-hop merge pool size (second hop is always attempted when the model returns a follow-up query).
     rag_multi_hop_pool_k: int = Field(default=20, ge=8, le=100)
     rag_similarity_threshold: float = 0.32
     # FAISS HNSW approximate dense retrieval (inner product = cosine on L2-normalized vectors).
@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     # Roughly: tokens ≈ chars / 4 for English. Overlap ~12–15% of chunk size is a common default.
     chunk_size_chars: int = Field(default=800, ge=32, le=8000)
     chunk_overlap_chars: int = Field(default=120, ge=0, le=2000)
-    evidence_overlap_min: float = 0.22
+    # Sentence–context Jaccard must be >= this to skip a "low_support" flag. Lower = fewer flags (more lenient).
+    evidence_overlap_min: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
 @lru_cache

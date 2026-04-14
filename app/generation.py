@@ -1,4 +1,4 @@
-"""Answer generation with intent-specific templates and citation grounding."""
+"""Answer generation with intent-specific templates."""
 
 from __future__ import annotations
 
@@ -11,17 +11,12 @@ from app.evidence import evidence_check, merge_context
 from app.hybrid_search import RankedChunk
 from app.mistral_client import mistral_chat
 
-
-_CITATION_RULE = (
-    "CITATION RULE: Every sentence or bullet that states a fact from CONTEXT must end with an inline "
-    "citation in parentheses, using the EXACT filename and page from that chunk's header. "
-    "Format: (Source: <filename exactly as given>, p.N) or (Source: <filename>, p.N–M) for a page range. "
-    "If one sentence combines two chunks, use two citations in order. Do not cite a file or page not in CONTEXT.\n"
-    "If CONTEXT does not address the question (wrong topic or missing facts), give a short statement only. "
-    "Do NOT add (Source: …) lines or list filenames/pages—retrieved chunks are not evidence for that reply.\n\n"
+_OUTPUT_RULE = (
+    "OUTPUT: Answer in plain language. Do not include PDF filenames, page numbers, '(Source: …)', "
+    "footnotes, or any citation markers in your reply.\n\n"
 )
 
-# Heuristic: model said the KB doesn't cover the question (strip API citations / footers).
+# Heuristic: model said the KB doesn't cover the question (strip trailing source junk).
 _CONTEXT_DENIAL_SNIPPETS = (
     "provided context does not contain",
     "context does not contain",
@@ -82,28 +77,27 @@ def strip_trailing_inline_sources(answer: str) -> str:
     return answer.strip()
 
 
+def _strip_inline_sources(text: str) -> str:
+    t = re.sub(r"\(\s*Source\s*:[^)]*\)", "", text, flags=re.IGNORECASE)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in t.splitlines()]
+    return "\n".join(lines).strip()
+
+
 def build_system_prompt(intent: str) -> str:
     base = (
         "You are a careful assistant that answers ONLY using the provided CONTEXT from the user's PDFs. "
         "If context is insufficient or off-topic for the question, say so briefly in one or two sentences. "
         "Quote or paraphrase faithfully when you do answer; do not invent facts. "
         "When CONTEXT combines passages that answer different parts of the question, link them explicitly.\n\n"
-        + _CITATION_RULE
+        + _OUTPUT_RULE
     )
     if intent == "list":
-        return (
-            base
-            + "Format: markdown bullet list. Each bullet must end with its (Source: …) citation.\n"
-        )
+        return base + "Format: markdown bullet list.\n"
     if intent == "compare":
-        return (
-            base
-            + "Format: markdown table; include a final column **Source** with (filename, page) for each row, "
-            "or put the citation at the end of the Details cell.\n"
-        )
+        return base + "Format: markdown table comparing the relevant points.\n"
     if intent == "summary":
-        return base + "Format: 3-6 bullet points; each bullet ends with (Source: …) as above.\n"
-    return base + "Format: concise paragraphs; each factual sentence ends with (Source: …).\n"
+        return base + "Format: 3–6 bullet points.\n"
+    return base + "Format: concise paragraphs.\n"
 
 
 def _page_label(page_start: int, page_end: int) -> str:
@@ -127,7 +121,7 @@ def build_user_prompt(question: str, ranked: list[RankedChunk]) -> str:
     ctx = "\n\n".join(parts)
     return (
         f"QUESTION:\n{question}\n\nCONTEXT:\n{ctx}\n\n"
-        f"Answer using only CONTEXT. Use the exact `Source document` filenames in every (Source: …) citation."
+        "Answer using only CONTEXT. Do not name files or pages in your answer."
     )
 
 
@@ -144,6 +138,7 @@ async def generate_answer(
         {"role": "user", "content": build_user_prompt(question, ranked)},
     ]
     answer = await mistral_chat(client, settings, messages, temperature=0.2, max_tokens=900)
+    answer = _strip_inline_sources(answer.strip())
     ctx = merge_context([r.stored.chunk.text for r in ranked])
     flags = evidence_check(answer, ctx, settings.evidence_overlap_min)
-    return answer.strip(), flags
+    return answer, flags

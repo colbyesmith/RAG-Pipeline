@@ -1,6 +1,6 @@
 # PDF RAG pipeline
 
-A **local FastAPI service** that ingests **PDFs**, indexes text chunks with **Mistral embeddings** and **hand-rolled BM25**, runs **hybrid retrieval** (dense + sparse + RRF), optionally **cross-encoder reranks** candidates, then answers with **Mistral chat** using **grounded citations**. A small **static UI** talks to `POST /ingest` and `POST /query`.
+A **local FastAPI service** that ingests **PDFs**, indexes text chunks with **Mistral embeddings** and **hand-rolled BM25**, runs **hybrid retrieval** (dense + sparse + RRF), optionally **cross-encoder reranks** candidates, then answers with **Mistral chat** grounded in retrieved context (no structured citation payloads in the API). A small **static UI** talks to `POST /ingest` and `POST /query`.
 
 **Design goal:** end-to-end RAG **without** LangChain, LlamaIndex, Elasticsearch, or a hosted vector database—**custom** tokenization, BM25 math, fusion, and policies—with **faiss-cpu** only for **approximate** dense search at scale and **sentence-transformers** for optional second-stage reranking.
 
@@ -13,7 +13,7 @@ A **local FastAPI service** that ingests **PDFs**, indexes text chunks with **Mi
 | Stage | Behavior |
 |--------|----------|
 | **Ingest** | PDF → native text (PyMuPDF + optional pypdf) → per-page character chunks → Mistral **embeddings** → in-memory store + **FAISS HNSW** index (row `i` = chunk `i`). Response includes **timings** (extract vs embed). |
-| **Query** | Policy screen → **intent** + query rewrites (Mistral JSON) → **hybrid search** (BM25 + dense, RRF) → optional **multi-hop** merge → **similarity gate** → optional **cross-encoder** rerank → **generation** with citations → if the model says the PDFs don’t contain the answer, **sources are omitted**; else **Jaccard evidence check** on the answer. |
+| **Query** | Policy screen → **intent** + query rewrites (Mistral JSON) → **hybrid search** (BM25 + dense, RRF) → optional **multi-hop** merge → **similarity gate** → optional **cross-encoder** rerank → **generation** → if the model says the PDFs don’t contain the answer, **irrelevant trailing text is trimmed**; else **Jaccard evidence check** on the answer. |
 
 ---
 
@@ -42,8 +42,8 @@ flowchart TB
     CE -->|no| GEN[Mistral answer]
     RERANK --> GEN
     GEN --> DENY{Context denial?}
-    DENY -->|yes| OUT1[Answer only, no citations]
-    DENY -->|no| EV[Evidence check + citations]
+    DENY -->|yes| OUT1[Answer only, trimmed]
+    DENY -->|no| EV[Evidence check]
   end
   MEM --> HY
 ```
@@ -54,7 +54,7 @@ flowchart TB
 
 - **Multipart** field `files`: one or more PDFs (see `upload_max_mb`).
 - **Text extraction:** PyMuPDF `get_text` first. With **`PDF_EXTRACT_FAST`**, pypdf is **skipped** when PyMuPDF already returns enough characters; otherwise pypdf is used (plain only in fast mode, plain+layout when fast is off). **No OCR**—image-only PDFs yield no text unless you OCR elsewhere.
-- **Chunking:** Sliding windows **per page** with overlap so `page_start` / `page_end` stay citation-safe. Defaults: `CHUNK_SIZE_CHARS` / `CHUNK_OVERLAP_CHARS` (see `.env.example`).
+- **Chunking:** Sliding windows **per page** with overlap so `page_start` / `page_end` stay page-accurate. Defaults: `CHUNK_SIZE_CHARS` / `CHUNK_OVERLAP_CHARS` (see `.env.example`).
 - **Embeddings:** Mistral `/v1/embeddings` in batches (`MISTRAL_EMBED_BATCH_SIZE`); total tokens per request are capped by Mistral—reduce batch size or chunk length if you see **400 / code 3210**.
 - **Response:** `chunks_added`, `message`, and **`timings`**: `pdf_extract_and_chunk_s` vs `embedding_s` (UI shows both).
 
@@ -65,14 +65,14 @@ flowchart TB
 1. **`policies`** — Regex / keyword blocks (e.g. PII patterns); can return a fixed disclaimer for legal/medical-style prompts.
 2. **`intent_query`** — One Mistral call returns JSON: skip retrieval for chit-chat, or `retrieval_query_semantic` + `retrieval_query_keywords` for search.
 3. **Hybrid retrieval** (`hybrid_search`): rebuild BM25 over all chunks; embed the semantic query; **dense** scores use **exact cosine** for small corpora or **FAISS HNSW** (inner product on L2-normalized vectors) when `rag_ann_min_chunks` is exceeded; **RRF** fuses BM25 and dense rankings with a small dual-signal bonus.
-4. **Multi-hop** (optional): proposed follow-up query → second hybrid pass → merge candidates (`multi_hop.py`).
+4. **Multi-hop** (optional): proposed follow-up query → second hybrid pass → merge candidates (`multi_hop.py`). Example question to try multi-hop reasoning (needs corpus that discusses the topic): *What was the object that Google Bard misidentified in its public demo? When was that object launched?*
 5. **Gate:** If the top fused hits are below **`RAG_SIMILARITY_THRESHOLD`** (best and mean checks), respond with **insufficient evidence** and no generation.
 6. **Cross-encoder** (default): score **(query, passage)** pairs locally; reorder to **`RAG_TOP_K`** (`cross_encoder_rerank.py`).
-7. **Generation:** Intent-shaped prompts (`generation.py`); inline **(Source: file, p.N)** when answering from context.
-8. **Context denial:** If the reply indicates the PDFs don’t cover the question, **trailing `(Source: …)` blocks and structured `citations` are stripped** so unrelated questions don’t show random retrieved files.
+7. **Generation:** Intent-shaped prompts (`generation.py`); plain-language answers without filename/page citations in the API response.
+8. **Context denial:** If the reply indicates the PDFs don’t cover the question, **trailing source-style junk may be trimmed** so unrelated questions don’t show random retrieved text.
 9. **Evidence check:** Token Jaccard of answer sentences vs context (`evidence.py`); weak overlap adds a caution note (not on pure “not in context” replies).
 
-**API responses** include `answer`, `citations`, `document_scores` (per-PDF score rollups from `attribution.py`), `insufficient_evidence`, `policy_flags`, `hallucination_flags`, and optional `debug`.
+**API responses** include `answer`, `insufficient_evidence`, `policy_flags`, `hallucination_flags`, and optional `debug`.
 
 ---
 
@@ -117,12 +117,12 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 | `RAG_RRF_K` | RRF smoothing constant (often ~60) |
 | `RAG_CROSS_ENCODER_ENABLED` | Local cross-encoder rerank |
 | `CROSS_ENCODER_MODEL` | Hugging Face id for `CrossEncoder` |
-| `RAG_MULTI_HOP_ENABLED` | Second retrieval hop with LLM follow-up query |
+| `RAG_MULTI_HOP_POOL_K` | Candidate pool size for merged first+second hop (multi-hop is always on) |
 | `RAG_ANN_ENABLED` | Use FAISS HNSW for dense scores when corpus is large |
 | `RAG_ANN_MIN_CHUNKS` | Use exact cosine below this count |
 | `RAG_ANN_NEIGHBORS` | FAISS `k` (should be ≥ retrieve pool) |
 | `UPLOAD_MAX_MB` | Max size per uploaded PDF |
-| `EVIDENCE_OVERLAP_MIN` | Min Jaccard for evidence check |
+| `EVIDENCE_OVERLAP_MIN` | Min sentence–context Jaccard to skip a weak-overlap flag (**lower** = fewer flags) |
 
 ---
 
@@ -167,7 +167,6 @@ app/
   generation.py        # Prompts + context-denial helpers
   evidence.py          # Lexical overlap check
   policies.py          # Safety / domain routing
-  attribution.py     # Per-document score rollups
   mistral_client.py    # Chat + embeddings + retries
 static/
   index.html           # Upload + chat UI

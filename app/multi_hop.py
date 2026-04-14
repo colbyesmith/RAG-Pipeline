@@ -7,6 +7,10 @@ two facets (e.g. "How does X relate to Y?" when X and Y surface in different chu
 
 from __future__ import annotations
 
+import json
+import logging
+from typing import Any
+
 import httpx
 
 from app.bm25 import BM25Index
@@ -15,6 +19,29 @@ from app.config import Settings
 from app.hybrid_search import RankedChunk
 from app.mistral_client import mistral_chat, parse_json_object
 from app.semantic_rank import embed_query_vector
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_followup_query(data: dict[str, Any]) -> str:
+    for key in ("followup_query", "follow_up_query", "followUpQuery", "second_query"):
+        raw = data.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
+def fallback_second_query(user_question: str, retrieval_semantic: str, retrieval_keywords: str) -> str | None:
+    """
+    When the LLM returns no follow-up, use a formulation distinct from the primary semantic query
+    so the second hybrid pass can surface different chunks (keyword-heavy vs paraphrase).
+    """
+    sem = retrieval_semantic.strip()
+    sem_l = sem.lower()
+    for cand in (retrieval_keywords.strip(), user_question.strip()):
+        if len(cand) >= 4 and cand.lower() != sem_l:
+            return cand
+    return None
 
 
 def _previews_for_prompt(ranked: list[RankedChunk], max_chunks: int = 5, max_chars: int = 280) -> str:
@@ -31,10 +58,12 @@ async def propose_followup_query(
     *,
     user_question: str,
     retrieval_semantic: str,
+    retrieval_keywords: str,
     first_hop_ranked: list[RankedChunk],
 ) -> str | None:
     """
-    Returns a follow-up search string, or None if the model says a second hop is not needed.
+    Returns a follow-up search string for hop-2, or None only if no usable variant exists.
+    Multi-hop is always attempted: we prefer the LLM's query, then a keyword/user-question fallback.
     """
     previews = _previews_for_prompt(first_hop_ranked)
     user_msg = (
@@ -42,10 +71,10 @@ async def propose_followup_query(
         f"Primary retrieval query already used:\n{retrieval_semantic}\n\n"
         f"Top retrieved passage previews (may be incomplete):\n{previews}\n\n"
         'Return JSON only: {"needs_second_search": boolean, "followup_query": string}. '
-        "Set needs_second_search true ONLY if answering likely requires additional passages "
-        "(e.g. linking two different entities, comparing sections, or finding a fact not hinted in previews). "
-        "If true, followup_query must be a short standalone search query in English (keywords + entities). "
-        "Otherwise needs_second_search false and followup_query empty string."
+        "Set needs_second_search true whenever additional passages may help (comparisons, multiple entities, "
+        "or facts not clearly in previews). If true, followup_query must be a short English search string "
+        "that is NOT a verbatim copy of the primary retrieval query—use different keywords or focus. "
+        "If a second angle is unnecessary, set needs_second_search false and followup_query to empty string."
     )
     raw = await mistral_chat(
         client,
@@ -58,15 +87,17 @@ async def propose_followup_query(
         max_tokens=200,
         response_format={"type": "json_object"},
     )
-    data = parse_json_object(raw)
-    if not data.get("needs_second_search"):
-        return None
-    fq = str(data.get("followup_query", "")).strip()
-    if not fq or len(fq) < 4:
-        return None
-    if fq.lower() == retrieval_semantic.strip().lower():
-        return None
-    return fq
+    try:
+        data = parse_json_object(raw)
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.warning("multi_hop JSON parse failed: %s", e)
+        return fallback_second_query(user_question, retrieval_semantic, retrieval_keywords)
+
+    fq = _extract_followup_query(data)
+    if fq and len(fq) >= 4 and fq.lower() != retrieval_semantic.strip().lower():
+        return fq
+
+    return fallback_second_query(user_question, retrieval_semantic, retrieval_keywords)
 
 
 def merge_two_hop_candidates(

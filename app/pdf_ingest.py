@@ -7,7 +7,7 @@ Considerations
   long enough; otherwise pypdf plain (fast) or plain+layout (full) vs fitz, taking the longer.
 - **Scanned PDFs:** No OCR; image-only pages yield no text.
 - **Chunk size:** Character windows with overlap; see module constants.
-- **Metadata:** Page numbers on chunks for citations.
+- **Metadata:** Page numbers on chunks for provenance.
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ def chunk_pages(
     chunk_size: int,
     overlap: int,
 ) -> list[TextChunk]:
-    """Chunk per page so citations map to concrete PDF pages."""
+    """Chunk per page so page metadata maps to concrete PDF pages."""
     out: list[TextChunk] = []
     for page_num, text in pages:
         out.extend(_chunk_single_page_text(page_num, text, source_file, chunk_size, overlap))

@@ -24,10 +24,9 @@ from app.vector_ann import configure_vector_ann_from_settings
 from app.intent_query import classify_and_rewrite
 from app.pdf_ingest import TextChunk, chunk_pages, extract_pages_pdf
 from app.policies import evaluate_query_policies
-from app.multi_hop import merge_two_hop_candidates, propose_followup_query
+from app.multi_hop import fallback_second_query, merge_two_hop_candidates, propose_followup_query
 from app.mistral_client import MistralError, mistral_embed
-from app.attribution import summarize_scores_by_document
-from app.schemas import Citation, IngestResponse, IngestTimings, QueryRequest, QueryResponse
+from app.schemas import IngestResponse, IngestTimings, QueryRequest, QueryResponse
 
 _BASE = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
@@ -242,8 +241,7 @@ async def query_endpoint(
     pool_k = settings.rag_top_k
     if settings.rag_cross_encoder_enabled:
         pool_k = max(pool_k, settings.rag_retrieve_k)
-    if settings.rag_multi_hop_enabled:
-        pool_k = max(pool_k, settings.rag_multi_hop_pool_k)
+    pool_k = max(pool_k, settings.rag_multi_hop_pool_k)
 
     candidates = hybrid_search(
         chunks,
@@ -257,17 +255,18 @@ async def query_endpoint(
         retrieve_pool_k=pool_k,
     )
 
-    if settings.rag_multi_hop_enabled and candidates:
+    if candidates:
         try:
             follow = await propose_followup_query(
                 client,
                 settings,
                 user_question=q,
                 retrieval_semantic=sem_q,
+                retrieval_keywords=kw_q,
                 first_hop_ranked=candidates,
             )
         except MistralError:
-            follow = None
+            follow = fallback_second_query(q, sem_q, kw_q)
         if follow:
             try:
                 q_emb2 = (await mistral_embed(client, settings, [follow]))[0]
@@ -317,7 +316,6 @@ async def query_endpoint(
             intent=intent,
             insufficient_evidence=True,
             retrieval_skipped_reason="below_similarity_threshold",
-            citations=[],
             debug=debug,
         )
 
@@ -344,37 +342,19 @@ async def query_endpoint(
     if context_denial:
         answer = strip_trailing_inline_sources(answer)
         hallu_flags = []
-        citations: list[Citation] = []
-        doc_scores = []
         debug["context_denial"] = True
     else:
-        citations = [
-            Citation(
-                chunk_id=r.stored.chunk.id,
-                source_file=r.stored.chunk.source_file,
-                page_start=r.stored.chunk.page_start,
-                page_end=r.stored.chunk.page_end,
-                similarity=r.semantic_score,
-                bm25_score=r.bm25_score,
-                rrf_score=r.rrf_score,
-                cross_encoder_score=r.cross_encoder_score,
-            )
-            for r in ranked
-        ]
-        doc_scores = summarize_scores_by_document(ranked)
         if hallu_flags:
             answer = (
                 answer
                 + "\n\n_Note: some sentences had weak lexical overlap with retrieved passages; "
-                "verify critical claims against the cited chunks._"
+                "verify critical claims against the source material if needed._"
             )
 
     return QueryResponse(
         answer=answer,
         needs_retrieval=True,
         intent=intent,
-        document_scores=doc_scores,
-        citations=citations,
         hallucination_flags=hallu_flags,
         debug=debug,
     )
