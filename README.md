@@ -13,7 +13,7 @@ A **local FastAPI service** that ingests **PDFs**, indexes text chunks with **Mi
 | Stage | Behavior |
 |--------|----------|
 | **Ingest** | PDF → native text (PyMuPDF + optional pypdf) → per-page character chunks → Mistral **embeddings** → in-memory store + **FAISS HNSW** index (row `i` = chunk `i`). Response includes **timings** (extract vs embed). |
-| **Query** | Policy screen → **intent** + query rewrites (Mistral JSON) → **hybrid search** (BM25 + dense, RRF) → optional **multi-hop** merge → **similarity gate** → optional **cross-encoder** rerank → **generation** → if the model says the PDFs don’t contain the answer, **irrelevant trailing text is trimmed**; else **Jaccard evidence check** on the answer. |
+| **Query** | Policy screen → **intent** + query rewrites (Mistral JSON) → **hybrid search** (BM25 + dense, RRF) → **similarity gate** → optional **cross-encoder** rerank → **generation** → if the model says the PDFs don’t contain the answer, **irrelevant trailing text is trimmed**; else **Jaccard evidence check** on the answer. |
 
 ---
 
@@ -32,10 +32,7 @@ flowchart TB
     POL --> INT[Intent + retrieval queries]
     INT -->|no KB| DIR[Short direct reply]
     INT -->|search| HY[BM25 + dense + RRF]
-    HY --> MH{Multi-hop?}
-    MH -->|yes| HY2[Second hybrid + merge]
-    MH -->|no| GATE[Similarity gate]
-    HY2 --> GATE
+    HY --> GATE[Similarity gate]
     GATE -->|weak| IE[Insufficient evidence]
     GATE -->|ok| CE{Cross-encoder?}
     CE -->|yes| RERANK[Rerank top-K]
@@ -65,12 +62,11 @@ flowchart TB
 1. **`policies`** — Regex / keyword blocks (e.g. PII patterns); can return a fixed disclaimer for legal/medical-style prompts.
 2. **`intent_query`** — One Mistral call returns JSON: skip retrieval for chit-chat, or `retrieval_query_semantic` + `retrieval_query_keywords` for search.
 3. **Hybrid retrieval** (`hybrid_search`): rebuild BM25 over all chunks; embed the semantic query; **dense** scores use **exact cosine** for small corpora or **FAISS HNSW** (inner product on L2-normalized vectors) when `rag_ann_min_chunks` is exceeded; **RRF** fuses BM25 and dense rankings with a small dual-signal bonus.
-4. **Multi-hop** (optional): proposed follow-up query → second hybrid pass → merge candidates (`multi_hop.py`). Example question to try multi-hop reasoning (needs corpus that discusses the topic): *What was the object that Google Bard misidentified in its public demo? When was that object launched?*
-5. **Gate:** If the top fused hits are below **`RAG_SIMILARITY_THRESHOLD`** (best and mean checks), respond with **insufficient evidence** and no generation.
-6. **Cross-encoder** (default): score **(query, passage)** pairs locally; reorder to **`RAG_TOP_K`** (`cross_encoder_rerank.py`).
-7. **Generation:** Intent-shaped prompts (`generation.py`); plain-language answers without filename/page citations in the API response.
-8. **Context denial:** If the reply indicates the PDFs don’t cover the question, **trailing source-style junk may be trimmed** so unrelated questions don’t show random retrieved text.
-9. **Evidence check:** Token Jaccard of answer sentences vs context (`evidence.py`); weak overlap adds a caution note (not on pure “not in context” replies).
+4. **Gate:** If the top fused hits are below **`RAG_SIMILARITY_THRESHOLD`** (best and mean checks), respond with **insufficient evidence** and no generation.
+5. **Cross-encoder** (default): score **(query, passage)** pairs locally; reorder to **`RAG_TOP_K`** (`cross_encoder_rerank.py`).
+6. **Generation:** Intent-shaped prompts (`generation.py`); plain-language answers without filename/page citations in the API response.
+7. **Context denial:** If the reply indicates the PDFs don’t cover the question, **trailing source-style junk may be trimmed** so unrelated questions don’t show random retrieved text.
+8. **Evidence check:** Token Jaccard of answer sentences vs context (`evidence.py`); weak overlap adds a caution note (not on pure “not in context” replies).
 
 **API responses** include `answer`, `insufficient_evidence`, `policy_flags`, `hallucination_flags`, and optional `debug`.
 
@@ -117,7 +113,6 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 | `RAG_RRF_K` | RRF smoothing constant (often ~60) |
 | `RAG_CROSS_ENCODER_ENABLED` | Local cross-encoder rerank |
 | `CROSS_ENCODER_MODEL` | Hugging Face id for `CrossEncoder` |
-| `RAG_MULTI_HOP_POOL_K` | Candidate pool size for merged first+second hop (multi-hop is always on) |
 | `RAG_ANN_ENABLED` | Use FAISS HNSW for dense scores when corpus is large |
 | `RAG_ANN_MIN_CHUNKS` | Use exact cosine below this count |
 | `RAG_ANN_NEIGHBORS` | FAISS `k` (should be ≥ retrieve pool) |
@@ -163,7 +158,6 @@ app/
   hybrid_search.py     # RRF fusion
   intent_query.py      # Intent + query rewrites
   cross_encoder_rerank.py
-  multi_hop.py         # Optional second hop
   generation.py        # Prompts + context-denial helpers
   evidence.py          # Lexical overlap check
   policies.py          # Safety / domain routing

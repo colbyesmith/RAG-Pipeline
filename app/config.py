@@ -25,8 +25,6 @@ class Settings(BaseSettings):
     rag_retrieve_k: int = 24
     rag_cross_encoder_enabled: bool = True
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    # Multi-hop merge pool size (second hop is always attempted when the model returns a follow-up query).
-    rag_multi_hop_pool_k: int = Field(default=20, ge=8, le=100)
     rag_similarity_threshold: float = 0.32
     # FAISS HNSW approximate dense retrieval (inner product = cosine on L2-normalized vectors).
     rag_ann_enabled: bool = True

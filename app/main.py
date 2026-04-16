@@ -24,7 +24,6 @@ from app.vector_ann import configure_vector_ann_from_settings
 from app.intent_query import classify_and_rewrite
 from app.pdf_ingest import TextChunk, chunk_pages, extract_pages_pdf
 from app.policies import evaluate_query_policies
-from app.multi_hop import fallback_second_query, merge_two_hop_candidates, propose_followup_query
 from app.mistral_client import MistralError, mistral_embed
 from app.schemas import IngestResponse, IngestTimings, QueryRequest, QueryResponse
 
@@ -241,7 +240,6 @@ async def query_endpoint(
     pool_k = settings.rag_top_k
     if settings.rag_cross_encoder_enabled:
         pool_k = max(pool_k, settings.rag_retrieve_k)
-    pool_k = max(pool_k, settings.rag_multi_hop_pool_k)
 
     candidates = hybrid_search(
         chunks,
@@ -255,50 +253,7 @@ async def query_endpoint(
         retrieve_pool_k=pool_k,
     )
 
-    if candidates:
-        try:
-            follow = await propose_followup_query(
-                client,
-                settings,
-                user_question=q,
-                retrieval_semantic=sem_q,
-                retrieval_keywords=kw_q,
-                first_hop_ranked=candidates,
-            )
-        except MistralError:
-            follow = fallback_second_query(q, sem_q, kw_q)
-        if follow:
-            try:
-                q_emb2 = (await mistral_embed(client, settings, [follow]))[0]
-                hop2 = hybrid_search(
-                    chunks,
-                    bm25,
-                    follow,
-                    follow,
-                    q_emb2,
-                    top_k=pool_k,
-                    rrf_k=settings.rrf_k,
-                    settings=settings,
-                    retrieve_pool_k=pool_k,
-                )
-                candidates = merge_two_hop_candidates(
-                    chunks,
-                    bm25,
-                    candidates,
-                    hop2,
-                    q_emb,
-                    q_emb2,
-                    kw_q,
-                    follow,
-                    merge_top=pool_k,
-                )
-                debug["multi_hop_followup"] = follow
-            except MistralError:
-                debug["multi_hop_followup"] = None
-        else:
-            debug["multi_hop_followup"] = None
-
-    # Similarity gate uses first rag_top_k candidates after any merge (before CE rerank).
+    # Similarity gate uses first rag_top_k candidates (before CE rerank).
     pre_gate = candidates[: settings.rag_top_k]
     sem_scores = [r.semantic_score for r in pre_gate]
     best = max(sem_scores) if sem_scores else 0.0
