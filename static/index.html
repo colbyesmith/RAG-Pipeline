@@ -405,6 +405,13 @@
         if (data.policy_flags && data.policy_flags.length) meta.push("policy: " + data.policy_flags.join(", "));
         if (data.hallucination_flags && data.hallucination_flags.length)
           meta.push("evidence check: " + data.hallucination_flags.length + " sentence(s) flagged");
+        if (data.debug) {
+          const mh = data.debug.multi_hop_followup;
+          if (mh)
+            meta.push("multi-hop follow-up: " + escapeHtml(String(mh)));
+          else if (Object.prototype.hasOwnProperty.call(data.debug, "multi_hop_followup"))
+            meta.push("multi-hop: second search skipped (no distinct follow-up or embed error)");
+        }
         addBubble("assistant", body, meta.join(" · "));
       } catch (e) {
         addBubble("assistant", "Error: " + escapeHtml(e.message), "");
